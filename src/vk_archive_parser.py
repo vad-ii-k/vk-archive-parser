@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
 from urllib.parse import urlparse
+import hashlib
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,20 +36,36 @@ class VKArchiveParser:
         self.download_bots = download_bots
         self.download_voice = download_voice
         
-    def clean_filename(self, filename: str) -> str:
+    def clean_filename(self, filename: str, max_length: int = 60) -> str:
         """
-        Очищает имя файла от недопустимых символов.
+        Очищает имя файла от недопустимых символов и обрезает длинные имена.
         
         Args:
             filename: Исходное имя файла
+            max_length: Максимальная длина имени файла
             
         Returns:
             Очищенное имя файла
         """
-        cleaned = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        cleaned = re.sub(r'_+', '_', cleaned)
-        cleaned = cleaned.strip('_')
-        return cleaned if cleaned else "unnamed"
+        # Удаляем расширение файла для обработки
+        name, ext = os.path.splitext(filename)
+        
+        # Очищаем имя от недопустимых символов
+        name = re.sub(r'[<>:"/\\|?*]', '_', name)
+        name = re.sub(r'_+', '_', name)
+        name = name.strip('_')
+        
+        # Если имя пустое, используем значение по умолчанию
+        if not name:
+            name = "unnamed"
+            
+        # Обрезаем имя, если оно слишком длинное.
+        # Добавляем хеш для уникальности
+        if len(name) > max_length:
+            name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
+            name = name[:max_length] + f"_{name_hash}"
+        
+        return name + ext
         
     def parse_chats(self) -> List[Dict[str, str]]:
         """
@@ -235,35 +252,49 @@ class VKArchiveParser:
         Args:
             chat: Словарь с информацией о чате
         """
-        if chat["type"] == "bot" and not self.download_bots:
-            return
+        try:
+            if chat["type"] == "bot" and not self.download_bots:
+                return
+                
+            pages = self.get_chat_pages(chat["path"])
             
-        pages = self.get_chat_pages(chat["path"])
-        
-        type_dir = None
-        chat_dir = None
-        
-        for page in tqdm(pages, desc=f"Processing pages for {chat['name']}", leave=False):
-            attachments = self.parse_attachments(page)
-            for attachment in tqdm(attachments, desc=f"Processing attachments", leave=False):
-                url = attachment["url"]
-                if self.should_skip_url(url):
-                    continue
+            type_dir = None
+            chat_dir = None
+            
+            for page in tqdm(pages, desc=f"Processing pages for {chat['name']}", leave=False):
+                attachments = self.parse_attachments(page)
+                for attachment in tqdm(attachments, desc=f"Processing attachments", leave=False):
+                    url = attachment["url"]
+                    if self.should_skip_url(url):
+                        continue
+                        
+                    # Создаем более короткое имя файла с хешем
+                    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+                    filename = os.path.basename(urlparse(url).path)
+                    name, ext = os.path.splitext(filename)
                     
-                filename = os.path.basename(urlparse(url).path)
-                
-                if not type_dir:
-                    type_dir = self.output_path / chat["type"]
-                    type_dir.mkdir(exist_ok=True)
+                    if not ext:
+                        continue
+                        
+                    filename = f"{url_hash}{ext}"
                     
-                if not chat_dir:
-                    chat_dir = type_dir / self.clean_filename(chat["name"])
-                    chat_dir.mkdir(exist_ok=True)
-                
-                output_path = chat_dir / filename
-                
-                if not output_path.exists():
-                    self.download_file(url, output_path, attachment["date"])
+                    if not type_dir:
+                        type_dir = self.output_path / chat["type"]
+                        type_dir.mkdir(exist_ok=True)
+                        
+                    if not chat_dir:
+                        # Используем более короткое имя для директории чата
+                        chat_name = self.clean_filename(chat["name"], max_length=40)
+                        chat_dir = type_dir / chat_name
+                        chat_dir.mkdir(exist_ok=True)
+                    
+                    output_path = chat_dir / filename
+                    
+                    if not output_path.exists():
+                        self.download_file(url, output_path, attachment["date"])
+        except Exception as e:
+            print(f"Error processing chat {chat['name']}: {e}")
+            # Продолжаем работу со следующим чатом
     
     def run(self) -> None:
         """

@@ -34,6 +34,7 @@ ENV/
 # Project specific
 attachments/
 temp_attachments/
+tests/
 
 # OS
 .DS_Store
