@@ -47,23 +47,12 @@ class VKArchiveParser:
         Returns:
             Очищенное имя файла
         """
-        # Удаляем расширение файла для обработки
         name, ext = os.path.splitext(filename)
-        
-        # Очищаем имя от недопустимых символов
         name = re.sub(r'[<>:"/\\|?*]', '_', name)
-        name = re.sub(r'_+', '_', name)
-        name = name.strip('_')
+        name = re.sub(r'_+', '_', name).strip('_') or "unnamed"
         
-        # Если имя пустое, используем значение по умолчанию
-        if not name:
-            name = "unnamed"
-            
-        # Обрезаем имя, если оно слишком длинное.
-        # Добавляем хеш для уникальности
         if len(name) > max_length:
-            name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
-            name = name[:max_length] + f"_{name_hash}"
+            name = name[:max_length] + f"_{hashlib.md5(name.encode()).hexdigest()[:8]}"
         
         return name + ext
         
@@ -74,33 +63,26 @@ class VKArchiveParser:
         Returns:
             Список словарей с информацией о чатах (имя, путь, тип)
         """
-        main_file = self.archive_path / "index-messages.html"
-        with open(main_file, "r", encoding="windows-1251") as f:
+        with open(self.archive_path / "index-messages.html", "r", encoding="windows-1251") as f:
             soup = BeautifulSoup(f.read(), "html.parser")
             
         chats = []
         for item in soup.select(".item"):
             link = item.select_one(".message-peer--id a")
-            if link:
-                chat_name = link.text.strip()
-                chat_path = link["href"]
-                chat_id = re.search(r"(-?\d+)/messages", chat_path)
-                if chat_id:
-                    chat_id = int(chat_id.group(1))
-                    if chat_id > 2000000000:
-                        chat_type = "group"
-                    elif chat_id < 0:
-                        chat_type = "bot"
-                    else:
-                        chat_type = "personal"
-                else:
-                    chat_type = "other"
+            if not link:
+                continue
+                
+            chat_name = link.text.strip()
+            chat_path = link["href"]
+            chat_id = re.search(r"(-?\d+)/messages", chat_path)
+            
+            if not chat_id:
+                chat_type = "other"
+            else:
+                chat_id = int(chat_id.group(1))
+                chat_type = "group" if chat_id > 2000000000 else "bot" if chat_id < 0 else "personal"
                     
-                chats.append({
-                    "name": chat_name,
-                    "path": chat_path,
-                    "type": chat_type
-                })
+            chats.append({"name": chat_name, "path": chat_path, "type": chat_type})
         return chats
     
     def get_chat_pages(self, chat_path: str) -> List[str]:
@@ -114,14 +96,9 @@ class VKArchiveParser:
             Список путей к страницам чата, отсортированный по номеру
         """
         chat_dir = os.path.dirname(chat_path)
-        pages = []
-        
-        for file in os.listdir(self.archive_path / chat_dir):
-            if file.startswith("messages") and file.endswith(".html"):
-                pages.append(os.path.join(chat_dir, file))
-        
-        pages.sort(key=lambda x: int(re.search(r"messages(\d+)\.html", x).group(1)))
-        return pages
+        pages = [os.path.join(chat_dir, f) for f in os.listdir(self.archive_path / chat_dir)
+                if f.startswith("messages") and f.endswith(".html")]
+        return sorted(pages, key=lambda x: int(re.search(r"messages(\d+)\.html", x).group(1)))
     
     def parse_attachments(self, chat_path: str) -> List[Dict[str, str]]:
         """
@@ -133,10 +110,15 @@ class VKArchiveParser:
         Returns:
             Список словарей с информацией о вложениях (URL, тип, дата)
         """
-        full_path = self.archive_path / chat_path
-        with open(full_path, "r", encoding="windows-1251") as f:
+        with open(self.archive_path / chat_path, "r", encoding="windows-1251") as f:
             soup = BeautifulSoup(f.read(), "html.parser")
             
+        months = {
+            'янв': '01', 'фев': '02', 'мар': '03', 'апр': '04',
+            'май': '05', 'июн': '06', 'июл': '07', 'авг': '08',
+            'сен': '09', 'окт': '10', 'ноя': '11', 'дек': '12'
+        }
+        
         attachments = []
         for message in soup.select(".message"):
             message_date = message.select_one(".message__header")
@@ -149,12 +131,6 @@ class VKArchiveParser:
                 continue
                 
             date_str = date_match.group(1)
-            months = {
-                'янв': '01', 'фев': '02', 'мар': '03', 'апр': '04',
-                'май': '05', 'июн': '06', 'июл': '07', 'авг': '08',
-                'сен': '09', 'окт': '10', 'ноя': '11', 'дек': '12'
-            }
-            
             for ru_month, num_month in months.items():
                 date_str = date_str.replace(ru_month, num_month)
             
@@ -165,14 +141,15 @@ class VKArchiveParser:
             
             for attachment in message.select(".attachment"):
                 link = attachment.select_one(".attachment__link")
-                if link:
-                    url = link["href"]
-                    description = attachment.select_one(".attachment__description").text
-                    attachments.append({
-                        "url": url,
-                        "type": description,
-                        "date": message_datetime
-                    })
+                if not link:
+                    continue
+                    
+                description = attachment.select_one(".attachment__description")
+                attachments.append({
+                    "url": link["href"],
+                    "type": description.text if description else "",
+                    "date": message_datetime
+                })
         return attachments
     
     def should_skip_url(self, url: str) -> bool:
@@ -185,20 +162,14 @@ class VKArchiveParser:
         Returns:
             True если URL нужно пропустить, False иначе
         """
-        skip_domains = {
-            'youtube.com', 'youtu.be',
-            'avito.ru',
-            'aliexpress.com', 'aliexpress.ru',
-            'pastebin.com',
-            'coderoad.ru',
-            'github.com',
-            'play.google.com'
-        }
-        domain = urlparse(url).netloc.lower()
-        
         if not self.download_voice and url.endswith('.ogg'):
             return True
             
+        domain = urlparse(url).netloc.lower()
+        skip_domains = {
+            'youtube.com', 'youtu.be', 'avito.ru', 'aliexpress.com', 'aliexpress.ru',
+            'pastebin.com', 'coderoad.ru', 'github.com', 'play.google.com'
+        }
         return any(skip_domain in domain for skip_domain in skip_domains)
     
     def download_file(self, url: str, output_path: Path, file_date: datetime) -> bool:
@@ -216,13 +187,11 @@ class VKArchiveParser:
         for attempt in range(self.max_retries):
             try:
                 time.sleep(self.request_delay)
-                
                 response = self.session.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 
-                content_length = response.headers.get('content-length')
-                if content_length and int(content_length) > 100 * 1024 * 1024:
-                    print(f"Warning: File {url} is too large ({content_length} bytes), skipping")
+                if int(response.headers.get('content-length', 0)) > 100 * 1024 * 1024:
+                    print(f"Warning: File {url} is too large, skipping")
                     return False
                 
                 with open(output_path, "wb") as f:
@@ -236,7 +205,6 @@ class VKArchiveParser:
             except RequestException as e:
                 if attempt < self.max_retries - 1:
                     print(f"Attempt {attempt + 1} failed for {url}: {e}")
-                    print(f"Retrying in {self.retry_delay} seconds...")
                     time.sleep(self.retry_delay)
                 else:
                     print(f"Failed to download {url} after {self.max_retries} attempts: {e}")
@@ -257,9 +225,12 @@ class VKArchiveParser:
                 return
                 
             pages = self.get_chat_pages(chat["path"])
+            type_dir = self.output_path / chat["type"]
+            type_dir.mkdir(exist_ok=True)
             
-            type_dir = None
-            chat_dir = None
+            chat_name = self.clean_filename(chat["name"], max_length=40)
+            chat_dir = type_dir / chat_name
+            chat_dir.mkdir(exist_ok=True)
             
             for page in tqdm(pages, desc=f"Processing pages for {chat['name']}", leave=False):
                 attachments = self.parse_attachments(page)
@@ -268,7 +239,6 @@ class VKArchiveParser:
                     if self.should_skip_url(url):
                         continue
                         
-                    # Создаем более короткое имя файла с хешем
                     url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
                     filename = os.path.basename(urlparse(url).path)
                     name, ext = os.path.splitext(filename)
@@ -276,20 +246,7 @@ class VKArchiveParser:
                     if not ext:
                         continue
                         
-                    filename = f"{url_hash}{ext}"
-                    
-                    if not type_dir:
-                        type_dir = self.output_path / chat["type"]
-                        type_dir.mkdir(exist_ok=True)
-                        
-                    if not chat_dir:
-                        # Используем более короткое имя для директории чата
-                        chat_name = self.clean_filename(chat["name"], max_length=40)
-                        chat_dir = type_dir / chat_name
-                        chat_dir.mkdir(exist_ok=True)
-                    
-                    output_path = chat_dir / filename
-                    
+                    output_path = chat_dir / f"{url_hash}{ext}"
                     if not output_path.exists():
                         self.download_file(url, output_path, attachment["date"])
         except Exception as e:
